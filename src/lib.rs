@@ -290,6 +290,22 @@ fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
     }
 }
 
+fn eval_built_in_form(exp: &LispExp, arg_forms: &[LispExp], env: &mut LispEnv) -> Option<Result<LispExp, LispErr>>{
+    match exp {
+        LispExp::Symbol(s) => {
+            todo!();
+            match s.as_ref() {
+                "if" => Some(eval_)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn eval_if_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
+    todo!()
+}
+
 fn parse_eval(exp: String, env: &mut LispEnv) -> Result<LispExp, LispErr> {
     let (parsed_exp, _) = parse(&tokenize(exp))?;
     let evaluated_exp = eval(&parsed_exp, env)?;
