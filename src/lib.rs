@@ -23,6 +23,7 @@ enum LispExp {
     Number(f64),
     List(Vec<LispExp>),
     Func(fn(&[LispExp]) -> Result<LispExp, LispErr>),
+    Nil,
 }
 
 impl LispExp {
@@ -33,6 +34,7 @@ impl LispExp {
             LispExp::Number(_) => "number".to_string(),
             LispExp::List(_) => "list".to_string(),
             LispExp::Func(_) => "function".to_string(),
+            LispExp::Nil => "nil".to_string(),
         }
     }
 }
@@ -48,6 +50,7 @@ impl Display for LispExp {
                 format!("({})", xs.join(","))
             },
             LispExp::Func(_) => "Function {}".to_string(),
+            LispExp::Nil => "nil".to_string(),
         };
 
         write!(f, "{}", display_string)
@@ -140,6 +143,7 @@ fn parse_atom(token: &str) -> LispExp {
     match token.as_ref() {
         "true" => LispExp::Bool(true),
         "false" => LispExp::Bool(false),
+        "nil" => LispExp::Nil,
         _ => {
             let potential_float: Result<f64, ParseFloatError> = token.parse();
 
@@ -263,7 +267,12 @@ fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
         LispExp::Symbol(k) => env.data.get(k).ok_or(LispErr::UnknownSymbol(k.clone())).map(|x| x.clone()),
         LispExp::Number(_a) => Ok(exp.clone()),
         LispExp::List(list) => {
-            let first_form = list.first().ok_or(LispErr::SyntaxErr(SyntaxErr::WrongExpNumber))?;
+            let first_form: Option<&LispExp> = list.first();
+
+            let first_form = match first_form {
+                None => return Ok(LispExp::Nil),
+                Some(v) => v,
+            };
             let arg_forms = &list[1..];
             let first_eval = eval(first_form, env)?;
 
@@ -276,6 +285,7 @@ fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
             }
         }
         LispExp::Func(f) => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpDidNotExpect(LispExp::Func(*f)))),
+        LispExp::Nil => Ok(LispExp::Nil),
 
     }
 }
