@@ -61,6 +61,10 @@ enum SyntaxErr {
     WrongExpExpected(LispExp),
     WrongExpDidNotExpect(LispExp),
     WrongExpNumber,
+    DidExpectFormSyntax(String),
+    WrongFormNum(usize),
+    WrongFormExp(usize, LispExp)
+
 }
 
 impl Display for SyntaxErr {
@@ -70,6 +74,9 @@ impl Display for SyntaxErr {
             SyntaxErr::WrongExpExpected(exp) => format!("Needed a {} expression, but got something else!", exp.exp_to_string()),
             SyntaxErr::WrongExpNumber => format!("Got the wrong number of expressions!"),
             SyntaxErr::WrongExpDidNotExpect(exp) => format!("Got a {} expression, but needed something else!", exp.exp_to_string()),
+            SyntaxErr::DidExpectFormSyntax(s) => format!("Did expect symbol {} here!", s),
+            SyntaxErr::WrongFormNum(n) => format!("Wrong number of form expressions! Needed: {}", n),
+            SyntaxErr::WrongFormExp(n, exp) => format!("Expected form number: {} to be a {}", n, exp.exp_to_string())
         };
 
         write!(f, "{} {}", preamble, message)
@@ -274,36 +281,78 @@ fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
                 Some(v) => v,
             };
             let arg_forms = &list[1..];
-            let first_eval = eval(first_form, env)?;
 
-            match first_eval {
-                LispExp::Func(f) => {
-                    let args_eval = arg_forms.iter().map(|x| eval(x, env)).collect::<Result<Vec<LispExp>, LispErr>>();
-                    f(&args_eval?)
-                },
-                _ => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpExpected(LispExp::Func(|_args: &[LispExp]| -> Result<LispExp, LispErr>{Ok(LispExp::Number(1 as f64))}))))
+            match eval_built_in_form(first_form, arg_forms, env) {
+                Some(result) => result,
+                None => {
+                    let first_eval = eval(first_form, env)?;
+
+                    match first_eval {
+                        LispExp::Func(f) => {
+                            let args_eval = arg_forms
+                                .iter()
+                                .map(|x| eval(x, env))
+                                .collect::<Result<Vec<LispExp>, LispErr>>();
+                            f(&args_eval?)
+                        },
+                        _ => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpExpected(LispExp::Func(|_args: &[LispExp]| -> Result<LispExp, LispErr>{Ok(LispExp::Number(1 as f64))}))))
+                    }
+                }
             }
-        }
+        },
         LispExp::Func(f) => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpDidNotExpect(LispExp::Func(*f)))),
         LispExp::Nil => Ok(LispExp::Nil),
-
     }
 }
 
 fn eval_built_in_form(exp: &LispExp, arg_forms: &[LispExp], env: &mut LispEnv) -> Option<Result<LispExp, LispErr>>{
     match exp {
         LispExp::Symbol(s) => {
-            todo!();
             match s.as_ref() {
-                "if" => Some(eval_)
+                "if" => Some(eval_if_args(arg_forms, env)),
+                "def" => Some(eval_dev_args(arg_forms, env)),
+                _ => None,
             }
-        }
+        },
         _ => None,
     }
 }
 
 fn eval_if_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
-    todo!()
+    let if_form = arg_forms.first().ok_or(LispErr::SyntaxErr(SyntaxErr::DidExpectFormSyntax("if".to_string())))?;
+    let if_eval = eval(if_form, env)?;
+
+    match if_eval {
+        LispExp::Bool(b) => {
+            let form_idx = if b { 1 } else { 2 };
+            let result_form = arg_forms.get(form_idx).ok_or(LispErr::SyntaxErr(SyntaxErr::WrongFormNum(form_idx)))?;
+            let result_eval = eval(result_form, env);
+
+            result_eval
+        },
+        _ => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpDidNotExpect(if_eval))),
+    }
+}
+
+fn eval_dev_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
+
+    if arg_forms.len() > 2 {
+        return Err(LispErr::SyntaxErr(SyntaxErr::WrongFormNum(2)));
+    }
+
+    let first_form = arg_forms.first().ok_or(LispErr::SyntaxErr(SyntaxErr::DidExpectFormSyntax("def".to_string())))?;
+    let first_str = match first_form {
+        LispExp::Symbol(s) => {Ok(s.clone())}
+        _ => Err(LispErr::SyntaxErr(SyntaxErr::WrongFormExp(0, LispExp::Symbol("a".to_string()))))
+    }?;
+
+    let second_form = arg_forms.get(1).ok_or(LispErr::SyntaxErr(SyntaxErr::WrongFormNum(2)))?;
+
+    let second_eval = eval(second_form, env)?;
+    env.data.insert(first_str, second_eval);
+
+    Ok(first_form.clone())
+
 }
 
 fn parse_eval(exp: String, env: &mut LispEnv) -> Result<LispExp, LispErr> {
