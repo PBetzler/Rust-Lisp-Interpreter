@@ -18,6 +18,7 @@ pub fn run() {
 
 #[derive(Clone)]
 enum LispExp {
+    Bool(bool),
     Symbol(String),
     Number(f64),
     List(Vec<LispExp>),
@@ -27,6 +28,7 @@ enum LispExp {
 impl LispExp {
     fn exp_to_string(&self) -> String {
         match self {
+            LispExp::Bool(_) => "bool".to_string(),
             LispExp::Symbol(_) => "symbol".to_string(),
             LispExp::Number(_) => "number".to_string(),
             LispExp::List(_) => "list".to_string(),
@@ -38,6 +40,7 @@ impl LispExp {
 impl Display for LispExp {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let display_string = match self {
+            LispExp::Bool(b) => b.to_string(),
             LispExp::Symbol(s) => s.clone(),
             LispExp::Number(n) => n.to_string(),
             LispExp::List(list) => {
@@ -67,8 +70,6 @@ impl Display for SyntaxErr {
         };
 
         write!(f, "{} {}", preamble, message)
-
-
     }
 }
 
@@ -115,7 +116,7 @@ fn parse(tokens: &[String]) -> Result<(LispExp, &[String]), LispErr> {
     }
 }
 
-fn read_seq<'a>(tokens: &'a [String]) -> Result<(LispExp, &'a [String]), LispErr> {
+fn read_seq(tokens: &[String]) -> Result<(LispExp, &[String]), LispErr> {
     let mut result: Vec<LispExp> = Vec::new();
     let mut xs = tokens;
 
@@ -135,11 +136,18 @@ fn read_seq<'a>(tokens: &'a [String]) -> Result<(LispExp, &'a [String]), LispErr
 }
 
 fn parse_atom(token: &str) -> LispExp {
-    let potential_float: Result<f64, ParseFloatError> = token.parse();
 
-    match potential_float {
-        Ok(v) => LispExp::Number(v),
-        Err(_) => LispExp::Symbol(token.to_string().clone())
+    match token.as_ref() {
+        "true" => LispExp::Bool(true),
+        "false" => LispExp::Bool(false),
+        _ => {
+            let potential_float: Result<f64, ParseFloatError> = token.parse();
+
+            match potential_float {
+                Ok(v) => LispExp::Number(v),
+                Err(_) => LispExp::Symbol(token.to_string().clone())
+            }
+        }
     }
 }
 
@@ -171,6 +179,67 @@ fn default_env() -> LispEnv {
         )
     );
 
+    data.insert(
+        "*".to_string(),
+        LispExp::Func(
+            |args: &[LispExp]| -> Result<LispExp, LispErr> {
+                let sum = parse_list_of_floats(args)?.iter().fold(1.0, |sum, a| sum * a);
+
+                Ok(LispExp::Number(sum))
+            }
+        )
+    );
+
+    data.insert(
+        "/".to_string(),
+        LispExp::Func(
+            |args: &[LispExp]| -> Result<LispExp, LispErr> {
+                let floats = parse_list_of_floats(args)?;
+                let first = *floats.first().ok_or(LispErr::SyntaxErr(SyntaxErr::WrongExpNumber))?;
+                let sum_rest = floats[1..].iter().fold(0.0, |sum, a| sum + a);
+
+                Ok(LispExp::Number(first / sum_rest))
+            }
+        )
+    );
+
+    data.insert(
+        "mod".to_string(),
+        LispExp::Func(
+            |args: &[LispExp]| -> Result<LispExp, LispErr> {
+                let floats = parse_list_of_floats(args)?;
+                if floats.len() != 2 {
+                    return Err(LispErr::SyntaxErr(SyntaxErr::WrongExpNumber));
+                }
+                let first = *floats.first().ok_or(LispErr::SyntaxErr(SyntaxErr::WrongExpNumber))?;
+                let second = floats[1];
+
+                Ok(LispExp::Number(first % second))
+            }
+        )
+    );
+
+    data.insert(
+        "=".to_string(),
+        LispExp::Func(ensure_tonicity!(|a, b| a == b))
+    );
+    data.insert(
+        ">".to_string(),
+        LispExp::Func(ensure_tonicity!(|a, b| a > b))
+    );
+    data.insert(
+        ">=".to_string(),
+        LispExp::Func(ensure_tonicity!(|a, b| a >= b))
+    );
+    data.insert(
+        "<".to_string(),
+        LispExp::Func(ensure_tonicity!(|a, b| a < b))
+    );
+    data.insert(
+        "<=".to_string(),
+        LispExp::Func(ensure_tonicity!(|a, b| a <= b))
+    );
+
     LispEnv {data}
 }
 
@@ -190,6 +259,7 @@ fn parse_list_of_floats(args: &[LispExp]) -> Result<Vec<f64>, LispErr> {
 
 fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
     match exp {
+        LispExp::Bool(_b) => Ok(exp.clone()),
         LispExp::Symbol(k) => env.data.get(k).ok_or(LispErr::UnknownSymbol(k.clone())).map(|x| x.clone()),
         LispExp::Number(_a) => Ok(exp.clone()),
         LispExp::List(list) => {
@@ -202,10 +272,11 @@ fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
                     let args_eval = arg_forms.iter().map(|x| eval(x, env)).collect::<Result<Vec<LispExp>, LispErr>>();
                     f(&args_eval?)
                 },
-                _ => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpExpected(LispExp::Func(|args: &[LispExp]| -> Result<LispExp, LispErr>{Ok(LispExp::Number(1 as f64))}))))
+                _ => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpExpected(LispExp::Func(|_args: &[LispExp]| -> Result<LispExp, LispErr>{Ok(LispExp::Number(1 as f64))}))))
             }
         }
-        LispExp::Func(f) => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpDidNotExpect(LispExp::Func(*f))))
+        LispExp::Func(f) => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpDidNotExpect(LispExp::Func(*f)))),
+
     }
 }
 
@@ -221,4 +292,22 @@ fn slurp_exp() -> String {
     io::stdin().read_line(&mut exp).expect("Failed to read input line!");
 
     exp
+}
+
+#[macro_export]
+macro_rules! ensure_tonicity {
+  ($check_fn:expr) => {{
+    |args: &[LispExp]| -> Result<LispExp, LispErr> {
+      let floats = parse_list_of_floats(args)?;
+      let first = floats.first().ok_or(LispErr::SyntaxErr(SyntaxErr::WrongExpNumber))?;
+      let rest = &floats[1..];
+      fn f (prev: &f64, xs: &[f64]) -> bool {
+        match xs.first() {
+          Some(x) => $check_fn(prev, x) && f(x, &xs[1..]),
+          None => true,
+        }
+      }
+      Ok(LispExp::Bool(f(first, rest)))
+    }
+  }};
 }
