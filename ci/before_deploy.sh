@@ -22,6 +22,11 @@ main() {
 
 	case $TRAVIS_OS_NAME in
         linux)
+			cp target/$TARGET/release/lisp_interpreter $stage/
+
+			cd $stage
+			tar czf $src/$CRATE_NAME-$TRAVIS_TAG-$TARGET.tar.gz *
+            ;;
 		osx)
             cp target/$TARGET/release/lisp_interpreter $stage/
 
