@@ -20,11 +20,20 @@ main() {
     # TODO Update this to build the artifacts that matter to you
     cross build --target $TARGET --release
 
-    # TODO Update this to package the right artifacts
-    cp target/$TARGET/release/lisp_interpreter* $stage/
+	case $TRAVIS_OS_NAME in
+        linux)
+		osx)
+            cp target/$TARGET/release/lisp_interpreter $stage/
 
-    cd $stage
-    tar czf $src/$CRATE_NAME-$TRAVIS_TAG-$TARGET.tar.gz *
+			cd $stage
+			tar czf $src/$CRATE_NAME-$TRAVIS_TAG-$TARGET.tar.gz *
+            ;;
+		windows)
+			cp target/$TARGET/release/lisp_interpreter.exe $src/$CRATE_NAME-$TRAVIS_TAG-$TARGET.exe
+			cd $stage
+			;;
+    esac
+    
     cd $src
 
     rm -rf $stage
