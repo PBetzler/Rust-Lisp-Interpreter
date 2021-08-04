@@ -1,0 +1,8 @@
+(+ 1 2)
+(* 1 2 3 4)
+(/ 4 2)
+(def a 10)
+a
+(if (> a 2) (def add-one (fn (n) (+ n 1))) (nil))
+add-one
+(add-one a)

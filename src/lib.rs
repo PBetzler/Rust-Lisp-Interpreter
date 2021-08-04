@@ -2,18 +2,66 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::num::ParseFloatError;
 use std::io;
+use std::rc::Rc;
+use std::fs::File;
+use std::io::{BufReader, BufRead};
+use std::path::Path;
 
-pub fn run() {
+pub enum InputSource {
+    StdIn,
+    File(String),
+}
+
+pub fn run(src: InputSource) {
     let env = &mut default_env();
 
-    loop {
-        println!("lisp >");
-        let exp = slurp_exp();
-        match parse_eval(exp, env) {
-            Ok(result) => println!("{}", result),
-            Err(e) => println!("{}", e.to_string()),
+    match src {
+        InputSource::StdIn => {
+            loop {
+                println!("lisp >");
+                let exp = slurp_exp();
+
+                if exp.contains("exit") {
+                    break;
+                }
+
+                match parse_eval(exp, env) {
+                    Ok(result) => println!("{}", result),
+                    Err(e) => eprintln!("{}", e.to_string()),
+                }
+            }
+        }
+        InputSource::File(filename) => {
+            let path = Path::new(&filename);
+            let display = path.display();
+            let file = match File::open(path) {
+                Ok(file) => file,
+                Err(err) => {
+                    eprintln!("Error opening file {}: {}", display, err);
+                    return;
+                }
+            };
+
+
+            let reader = BufReader::new(file);
+
+            for (index, line) in reader.lines().enumerate() {
+                match line {
+                    Ok(line) => {
+                        println!("Line {}: {}", index+1, line);
+                        match parse_eval(line, env) {
+                            Ok(result) => println!("Line {}: {}", index+1, result),
+                            Err(e) => eprintln!("Line: {} Error: {}", index +1, e.to_string()),
+                        }
+                    }
+                    Err(_) => eprintln!("Error reading line: {} from file: {}", index +1, filename.to_string())
+                }
+
+            }
         }
     }
+
+
 }
 
 #[derive(Clone)]
@@ -24,6 +72,13 @@ enum LispExp {
     List(Vec<LispExp>),
     Func(fn(&[LispExp]) -> Result<LispExp, LispErr>),
     Nil,
+    Lambda(LispLambda)
+}
+
+#[derive(Clone)]
+struct LispLambda {
+    params_exp: Rc<LispExp>,
+    body_exp: Rc<LispExp>,
 }
 
 impl LispExp {
@@ -35,6 +90,7 @@ impl LispExp {
             LispExp::List(_) => "list".to_string(),
             LispExp::Func(_) => "function".to_string(),
             LispExp::Nil => "nil".to_string(),
+            LispExp::Lambda(_) => "lambda".to_string(),
         }
     }
 }
@@ -51,6 +107,7 @@ impl Display for LispExp {
             },
             LispExp::Func(_) => "Function {}".to_string(),
             LispExp::Nil => "nil".to_string(),
+            LispExp::Lambda(_) => "Lambda {}".to_string(),
         };
 
         write!(f, "{}", display_string)
@@ -63,7 +120,8 @@ enum SyntaxErr {
     WrongExpNumber,
     DidExpectFormSyntax(String),
     WrongFormNum(usize),
-    WrongFormExp(usize, LispExp)
+    WrongFormExp(usize, LispExp),
+    NoFormSyntaxExpected,
 
 }
 
@@ -76,7 +134,8 @@ impl Display for SyntaxErr {
             SyntaxErr::WrongExpDidNotExpect(exp) => format!("Got a {} expression, but needed something else!", exp.exp_to_string()),
             SyntaxErr::DidExpectFormSyntax(s) => format!("Did expect symbol {} here!", s),
             SyntaxErr::WrongFormNum(n) => format!("Wrong number of form expressions! Needed: {}", n),
-            SyntaxErr::WrongFormExp(n, exp) => format!("Expected form number: {} to be a {}", n, exp.exp_to_string())
+            SyntaxErr::WrongFormExp(n, exp) => format!("Expected form number: {} to be a {}", n, exp.exp_to_string()),
+            SyntaxErr::NoFormSyntaxExpected => format!("Did not expect form syntax here!"),
         };
 
         write!(f, "{} {}", preamble, message)
@@ -84,7 +143,7 @@ impl Display for SyntaxErr {
 }
 
 enum LispErr {
-    SyntaxErr(SyntaxErr),
+    SyntaxError(SyntaxErr),
     UnbalancedParens,
     UnknownSymbol(String),
 }
@@ -92,7 +151,7 @@ enum LispErr {
 impl Display for LispErr {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let message: String = match self {
-            LispErr::SyntaxErr(err) => err.to_string(),
+            LispErr::SyntaxError(err) => err.to_string(),
             LispErr::UnbalancedParens => "Unbalanced parens!".to_string(),
             LispErr::UnknownSymbol(k) => format!("Unknown symbol {}!", k),
         };
@@ -101,8 +160,9 @@ impl Display for LispErr {
     }
 }
 
-pub struct LispEnv {
+pub struct LispEnv<'a> {
     data: HashMap<String, LispExp>,
+    outer: Option<&'a LispEnv<'a>>,
 }
 
 fn tokenize(expr: String) ->Vec<String> {
@@ -116,7 +176,7 @@ fn tokenize(expr: String) ->Vec<String> {
 
 fn parse(tokens: &[String]) -> Result<(LispExp, &[String]), LispErr> {
     let (token, rest) = tokens.split_first().ok_or(
-        LispErr::SyntaxErr(SyntaxErr::WrongExpNumber)
+        LispErr::SyntaxError(SyntaxErr::WrongExpNumber)
     )?;
 
     match &token[..] {
@@ -163,7 +223,7 @@ fn parse_atom(token: &str) -> LispExp {
 }
 
 
-fn default_env() -> LispEnv {
+fn default_env<'a>() -> LispEnv<'a> {
     let mut data: HashMap<String, LispExp> = HashMap::new();
 
     data.insert(
@@ -182,7 +242,7 @@ fn default_env() -> LispEnv {
         LispExp::Func(
             |args: &[LispExp]| -> Result<LispExp, LispErr> {
                 let floats = parse_list_of_floats(args)?;
-                let first = *floats.first().ok_or(LispErr::SyntaxErr(SyntaxErr::WrongExpNumber))?;
+                let first = *floats.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongExpNumber))?;
                 let sum_rest = floats[1..].iter().fold(0.0, |sum, a| sum + a);
 
                 Ok(LispExp::Number(first - sum_rest))
@@ -206,7 +266,7 @@ fn default_env() -> LispEnv {
         LispExp::Func(
             |args: &[LispExp]| -> Result<LispExp, LispErr> {
                 let floats = parse_list_of_floats(args)?;
-                let first = *floats.first().ok_or(LispErr::SyntaxErr(SyntaxErr::WrongExpNumber))?;
+                let first = *floats.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongExpNumber))?;
                 let sum_rest = floats[1..].iter().fold(0.0, |sum, a| sum + a);
 
                 Ok(LispExp::Number(first / sum_rest))
@@ -220,9 +280,9 @@ fn default_env() -> LispEnv {
             |args: &[LispExp]| -> Result<LispExp, LispErr> {
                 let floats = parse_list_of_floats(args)?;
                 if floats.len() != 2 {
-                    return Err(LispErr::SyntaxErr(SyntaxErr::WrongExpNumber));
+                    return Err(LispErr::SyntaxError(SyntaxErr::WrongExpNumber));
                 }
-                let first = *floats.first().ok_or(LispErr::SyntaxErr(SyntaxErr::WrongExpNumber))?;
+                let first = *floats.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongExpNumber))?;
                 let second = floats[1];
 
                 Ok(LispExp::Number(first % second))
@@ -251,13 +311,13 @@ fn default_env() -> LispEnv {
         LispExp::Func(ensure_tonicity!(|a, b| a <= b))
     );
 
-    LispEnv {data}
+    LispEnv {data, outer: None}
 }
 
 fn parse_single_float(exp: &LispExp) -> Result<f64, LispErr> {
     match exp {
         LispExp::Number(num) => Ok(*num),
-        _ => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpExpected(LispExp::Number(0 as f64))))
+        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpExpected(LispExp::Number(0 as f64))))
     }
 }
 
@@ -271,7 +331,7 @@ fn parse_list_of_floats(args: &[LispExp]) -> Result<Vec<f64>, LispErr> {
 fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
     match exp {
         LispExp::Bool(_b) => Ok(exp.clone()),
-        LispExp::Symbol(k) => env.data.get(k).ok_or(LispErr::UnknownSymbol(k.clone())).map(|x| x.clone()),
+        LispExp::Symbol(k) => env_get(k, env).ok_or(LispErr::UnknownSymbol(k.clone())).map(|x| x.clone()),
         LispExp::Number(_a) => Ok(exp.clone()),
         LispExp::List(list) => {
             let first_form: Option<&LispExp> = list.first();
@@ -289,20 +349,29 @@ fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
 
                     match first_eval {
                         LispExp::Func(f) => {
-                            let args_eval = arg_forms
-                                .iter()
-                                .map(|x| eval(x, env))
-                                .collect::<Result<Vec<LispExp>, LispErr>>();
+                            let args_eval = eval_forms(arg_forms, env);
                             f(&args_eval?)
                         },
-                        _ => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpExpected(LispExp::Func(|_args: &[LispExp]| -> Result<LispExp, LispErr>{Ok(LispExp::Number(1 as f64))}))))
+                        LispExp::Lambda(lambda) => {
+                            let new_env = &mut env_for_lambda(lambda.params_exp, arg_forms, env)?;
+                            eval(&lambda.body_exp, new_env)
+                        }
+                        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpExpected(LispExp::Func(|_args: &[LispExp]| -> Result<LispExp, LispErr>{Ok(LispExp::Number(1 as f64))}))))
                     }
                 }
             }
         },
-        LispExp::Func(f) => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpDidNotExpect(LispExp::Func(*f)))),
+        LispExp::Func(f) => Err(LispErr::SyntaxError(SyntaxErr::WrongExpDidNotExpect(LispExp::Func(*f)))),
         LispExp::Nil => Ok(LispExp::Nil),
+        LispExp::Lambda(_) => Err(LispErr::SyntaxError(SyntaxErr::NoFormSyntaxExpected)),
     }
+}
+
+fn eval_forms(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<Vec<LispExp>, LispErr> {
+    arg_forms
+        .iter()
+        .map(|x| {eval(x, env)})
+        .collect()
 }
 
 fn eval_built_in_form(exp: &LispExp, arg_forms: &[LispExp], env: &mut LispEnv) -> Option<Result<LispExp, LispErr>>{
@@ -311,6 +380,7 @@ fn eval_built_in_form(exp: &LispExp, arg_forms: &[LispExp], env: &mut LispEnv) -
             match s.as_ref() {
                 "if" => Some(eval_if_args(arg_forms, env)),
                 "def" => Some(eval_dev_args(arg_forms, env)),
+                "fn" => Some(eval_lambda_args(arg_forms)),
                 _ => None,
             }
         },
@@ -319,40 +389,99 @@ fn eval_built_in_form(exp: &LispExp, arg_forms: &[LispExp], env: &mut LispEnv) -
 }
 
 fn eval_if_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
-    let if_form = arg_forms.first().ok_or(LispErr::SyntaxErr(SyntaxErr::DidExpectFormSyntax("if".to_string())))?;
+    let if_form = arg_forms.first().ok_or(LispErr::SyntaxError(SyntaxErr::DidExpectFormSyntax("if".to_string())))?;
     let if_eval = eval(if_form, env)?;
 
     match if_eval {
         LispExp::Bool(b) => {
             let form_idx = if b { 1 } else { 2 };
-            let result_form = arg_forms.get(form_idx).ok_or(LispErr::SyntaxErr(SyntaxErr::WrongFormNum(form_idx)))?;
+            let result_form = arg_forms.get(form_idx).ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(form_idx)))?;
             let result_eval = eval(result_form, env);
 
             result_eval
         },
-        _ => Err(LispErr::SyntaxErr(SyntaxErr::WrongExpDidNotExpect(if_eval))),
+        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpDidNotExpect(if_eval))),
     }
 }
 
 fn eval_dev_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
 
     if arg_forms.len() > 2 {
-        return Err(LispErr::SyntaxErr(SyntaxErr::WrongFormNum(2)));
+        return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)));
     }
 
-    let first_form = arg_forms.first().ok_or(LispErr::SyntaxErr(SyntaxErr::DidExpectFormSyntax("def".to_string())))?;
+    let first_form = arg_forms.first().ok_or(LispErr::SyntaxError(SyntaxErr::DidExpectFormSyntax("def".to_string())))?;
     let first_str = match first_form {
         LispExp::Symbol(s) => {Ok(s.clone())}
-        _ => Err(LispErr::SyntaxErr(SyntaxErr::WrongFormExp(0, LispExp::Symbol("a".to_string()))))
+        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongFormExp(0, LispExp::Symbol("a".to_string()))))
     }?;
 
-    let second_form = arg_forms.get(1).ok_or(LispErr::SyntaxErr(SyntaxErr::WrongFormNum(2)))?;
+    let second_form = arg_forms.get(1).ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)))?;
 
     let second_eval = eval(second_form, env)?;
     env.data.insert(first_str, second_eval);
 
     Ok(first_form.clone())
 
+}
+
+fn eval_lambda_args(arg_forms: &[LispExp]) -> Result<LispExp, LispErr> {
+    if arg_forms.len() != 2 {
+        return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)));
+    }
+    let params_exp = arg_forms.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)))?;
+
+    let body_exp = arg_forms.get(1).ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)))?;
+    
+    Ok(LispExp::Lambda(LispLambda {
+        params_exp: Rc::new(params_exp.clone()),
+        body_exp: Rc::new(body_exp.clone()),
+    }))
+}
+
+fn env_get(k: &str, env: &LispEnv) -> Option<LispExp> {
+    match env.data.get(k) {
+        Some(exp) => Some(exp.clone()),
+        None => {
+            match &env.outer {
+                None => None,
+                Some(outer_env) => env_get(k, outer_env),
+            }
+        }
+    }
+}
+
+fn env_for_lambda<'a> (params: Rc<LispExp>, arg_forms: &[LispExp], outer_env: &'a mut LispEnv) -> Result<LispEnv<'a>, LispErr> {
+    let ks = parse_list_of_symbol_strings(params)?;
+    if ks.len() != arg_forms.len() {
+        return Err(LispErr::SyntaxError(SyntaxErr::WrongExpNumber));
+    }
+    
+    let vs = eval_forms(arg_forms, outer_env)?;
+    let mut data: HashMap<String, LispExp> = HashMap::new();
+    
+    for (k,v) in ks.iter().zip(vs.iter()) {
+        data.insert(k.clone(), v.clone());
+    }
+    
+    Ok(LispEnv {
+        data,
+        outer: Some(outer_env),
+    })
+}
+
+fn parse_list_of_symbol_strings(from: Rc<LispExp>) -> Result<Vec<String>, LispErr> {
+    let list = match from.as_ref() {
+        LispExp::List(s) => Ok(s.clone()),
+        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpExpected(LispExp::List(vec![])))),
+    }?;
+
+    list.iter().map(|x| {
+        match x {
+            LispExp::Symbol(s) => Ok(s.clone()),
+            _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpExpected(LispExp::Symbol("s".to_string())))),
+        }
+    }).collect()
 }
 
 fn parse_eval(exp: String, env: &mut LispEnv) -> Result<LispExp, LispErr> {
@@ -374,7 +503,7 @@ macro_rules! ensure_tonicity {
   ($check_fn:expr) => {{
     |args: &[LispExp]| -> Result<LispExp, LispErr> {
       let floats = parse_list_of_floats(args)?;
-      let first = floats.first().ok_or(LispErr::SyntaxErr(SyntaxErr::WrongExpNumber))?;
+      let first = floats.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongExpNumber))?;
       let rest = &floats[1..];
       fn f (prev: &f64, xs: &[f64]) -> bool {
         match xs.first() {
