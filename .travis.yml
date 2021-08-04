@@ -39,7 +39,8 @@ install:
 script:
   - bash ci/script.sh
 
-after_script: set +e
+after_script: 
+  - set +e
 
 before_deploy:
   - sh ci/before_deploy.sh
