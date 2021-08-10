@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::num::ParseFloatError;
-use std::io;
 use std::rc::Rc;
 use std::fs::File;
-use std::io::{BufReader, BufRead};
+use std::io::{BufReader, BufRead, Read, Write};
 use std::path::Path;
 
 pub enum InputSource {
@@ -12,23 +11,38 @@ pub enum InputSource {
     File(String),
 }
 
-pub fn run(src: InputSource) {
+pub fn run(src: InputSource, input: &mut (impl Read + BufRead), output: &mut impl Write, err_out: &mut impl Write) {
     let env = &mut default_env();
 
     match src {
         InputSource::StdIn => {
             loop {
-                println!("lisp >");
-                let exp = slurp_exp();
+                match output.write_all("lisp >\n".as_bytes()) {
+                    Ok(_) => {},
+                    Err(_) => match err_out.write_all("Error, can not write to given output stream!".as_bytes()) {
+                        Ok(_) => {}
+                        Err(_) => panic!("Fatal error, could not write to error stream!"),
+                    }
+                };
+                let exp = slurp_exp(input);
 
                 if exp.contains("exit") {
                     break;
                 }
 
                 match parse_eval(exp, env) {
-                    Ok(result) => println!("{}", result),
-                    Err(e) => eprintln!("{}", e.to_string()),
-                }
+                    Ok(result) => match output.write_all(format!("{}\n", result).as_bytes()) {
+                        Ok(_) => {},
+                        Err(_) => match err_out.write_all("Error, can not write to given output stream!".as_bytes()) {
+                            Ok(_) => {}
+                            Err(_) => panic!("Fatal error, could not write to error stream!"),
+                        },
+                    },
+                    Err(e) => match err_out.write_all(format!("{}\n", e).as_bytes()){
+                        Ok(_) => {}
+                        Err(_) => panic!("Fatal error, could not write to error stream!"),
+                    },
+                };
             }
         }
         InputSource::File(filename) => {
@@ -507,9 +521,9 @@ fn parse_eval(exp: String, env: &mut LispEnv) -> Result<LispExp, LispErr> {
 
 }
 
-fn slurp_exp() -> String {
+fn slurp_exp(input: &mut (impl Read  + BufRead)) -> String {
     let mut exp = String::new();
-    io::stdin().read_line(&mut exp).expect("Failed to read input line!");
+    input.read_line(&mut exp).expect("Failed to read input line!");
 
     exp
 }
@@ -531,3 +545,235 @@ macro_rules! ensure_tonicity {
     }
   }};
 }
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    static EXIT_PHRASE: &str = "\nexit";
+    static RESULT_PART: &str = "lisp >\n";
+
+    #[test]
+    fn add_test() {
+        let input: Vec<u8> = format!("(+ 1 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}3\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn failing_add_test() {
+        let input: Vec<u8> = format!("(+ 1 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}1\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+
+        assert_ne!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn sub_test() {
+        let input: Vec<u8> = format!("(- 2 1){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}1\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn failing_sub_test() {
+        let input: Vec<u8> = format!("(- 2 1){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}3\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_ne!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn mul_test() {
+        let input: Vec<u8> = format!("(* 1 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}2\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn failing_mul_test() {
+        let input: Vec<u8> = format!("(* 1 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}5\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_ne!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn div_test() {
+        let input: Vec<u8> = format!("(/ 4 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}2\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn failing_div_test() {
+        let input: Vec<u8> = format!("(/ 4 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}5\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_ne!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn mod_test() {
+        let input: Vec<u8> = format!("(mod 3 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}1\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn failing_mod_test() {
+        let input: Vec<u8> = format!("(mod 3 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}3\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_ne!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn def_test() {
+        let input: Vec<u8> = format!("(def a 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}a\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn def_2_test() {
+        let input: Vec<u8> = format!("(def a 2)\na{}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}a\n{}2\n{}", RESULT_PART, RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn failing_def_test() {
+        let input: Vec<u8> = format!("(def a 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}2\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_ne!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn if_test() {
+        let input: Vec<u8> = format!("(if true 2 3){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}2\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn failing_if_test() {
+        let input: Vec<u8> = format!("(if false 2 3){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}2\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_ne!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn lambda_test() {
+        let input: Vec<u8> = format!("(def add-one (fn (a) (+ a 1)))\n(add-one 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}add-one\n{}3\n{}", RESULT_PART, RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn failing_lambda_test() {
+        let input: Vec<u8> = format!("(def add-one (fn (a) (+ a 1)))\n(add-one 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}add-one\n{}1\n{}", RESULT_PART, RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_ne!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn quote_test() {
+        let input: Vec<u8> = format!("(quote a){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}a\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn quote_2_test() {
+        let input: Vec<u8> = format!("(quote a b c){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}a b c\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn quote_3_test() {
+        let input: Vec<u8> = format!("(quote a b c (a b)){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}a b c (a,b)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+}
+
