@@ -14,6 +14,10 @@ By now, the interpreter supports:
 - Functions
 - Lambdas
 - Nil
+- Quote
+- Cons
+- Car
+- Cdr
  
 - \+
 - \-
