@@ -31,7 +31,7 @@ pub fn run(src: InputSource, input: &mut (impl Read + BufRead), output: &mut imp
                 }
 
                 match parse_eval(exp, env) {
-                    Ok(result) => match output.write_all(format!("{}\n", result).as_bytes()) {
+                    Ok(result) => match output.write_all(format!("{}\n", lisp_exp_to_string(&result)).as_bytes()) {
                         Ok(_) => {},
                         Err(_) => match err_out.write_all("Error, can not write to given output stream!".as_bytes()) {
                             Ok(_) => {}
@@ -78,6 +78,15 @@ pub fn run(src: InputSource, input: &mut (impl Read + BufRead), output: &mut imp
 
 }
 
+fn lisp_exp_to_string(exp: &LispExp ) -> String {
+    match exp {
+        LispExp::Cons(_) => format!("({})", exp),
+        LispExp::Car(_) => format!("({})", exp),
+        LispExp::Cdr(_) => format!("({})", exp),
+        _ => exp.to_string(),
+    }
+}
+
 #[derive(Clone)]
 enum LispExp {
     Bool(bool),
@@ -88,6 +97,15 @@ enum LispExp {
     Nil,
     Lambda(LispLambda),
     Quote(Vec<LispExp>),
+    Cons(LispConsCell),
+    Car(Rc<LispExp>),
+    Cdr(Rc<LispExp>),
+}
+
+#[derive(Clone)]
+struct LispConsCell {
+    car: Rc<LispExp>,
+    cdr: Rc<LispExp>,
 }
 
 #[derive(Clone)]
@@ -107,6 +125,9 @@ impl LispExp {
             LispExp::Nil => "nil".to_string(),
             LispExp::Lambda(_) => "lambda".to_string(),
             LispExp::Quote(_) => "quote".to_string(),
+            LispExp::Cons(_) => "cons".to_string(),
+            LispExp::Car(_) => "car".to_string(),
+            LispExp::Cdr(_) => "cdr".to_string(),
         }
     }
 }
@@ -128,6 +149,24 @@ impl Display for LispExp {
                 let xs: Vec<String> = list.iter().map(|x| x.to_string()).collect();
                 format!("{}", xs.join(" "))
             },
+            LispExp::Cons(cell) => {
+                match cell.cdr.as_ref() {
+                    LispExp::Nil => cell.car.to_string(),
+                    _ => format!("{},{}", cell.car.to_string(), cell.cdr.to_string()),
+                }
+            }
+            LispExp::Car(cons) => {
+                match cons.as_ref() {
+                    LispExp::Cons(cell) => cell.car.to_string(),
+                    _ => panic!("Got an car expression that did not contain a cons expression! Should never came so far!"),
+                }
+            },
+            LispExp::Cdr(cons) => {
+                match cons.as_ref() {
+                    LispExp::Cons(cell) => cell.cdr.to_string(),
+                    _ => panic!("Got an cdr expression that did not contain a cons expression! Should never came so far!"),
+                }
+            },
         };
 
         write!(f, "{}", display_string)
@@ -142,6 +181,7 @@ enum SyntaxErr {
     WrongFormNum(usize),
     WrongFormExp(usize, LispExp),
     NoFormSyntaxExpected,
+    SimpleExpNeeded(LispExp),
 
 }
 
@@ -156,6 +196,7 @@ impl Display for SyntaxErr {
             SyntaxErr::WrongFormNum(n) => format!("Wrong number of form expressions! Needed: {}", n),
             SyntaxErr::WrongFormExp(n, exp) => format!("Expected form number: {} to be a {}", n, exp.exp_to_string()),
             SyntaxErr::NoFormSyntaxExpected => format!("Did not expect form syntax here!"),
+            SyntaxErr::SimpleExpNeeded(exp) => format!("Needed a bool, symbol, number, list or nil expression, but got a {}!", exp.exp_to_string()),
         };
 
         write!(f, "{} {}", preamble, message)
@@ -380,10 +421,13 @@ fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
                 }
             }
         },
-        LispExp::Func(f) => Err(LispErr::SyntaxError(SyntaxErr::WrongExpDidNotExpect(LispExp::Func(*f)))),
+        LispExp::Func(f) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Func(*f)))),
         LispExp::Nil => Ok(LispExp::Nil),
         LispExp::Lambda(_) => Err(LispErr::SyntaxError(SyntaxErr::NoFormSyntaxExpected)),
-        LispExp::Quote(_) => Err(LispErr::SyntaxError(SyntaxErr::WrongExpDidNotExpect(LispExp::Quote(vec![])))),
+        LispExp::Quote(_) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Quote(vec![])))),
+        LispExp::Cons(cell) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Cons(cell.clone())))),
+        LispExp::Car(cell) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Car(cell.clone())))),
+        LispExp::Cdr(cell) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Cdr(cell.clone())))),
     }
 }
 
@@ -401,7 +445,10 @@ fn eval_built_in_form(exp: &LispExp, arg_forms: &[LispExp], env: &mut LispEnv) -
                 "if" => Some(eval_if_args(arg_forms, env)),
                 "def" => Some(eval_def_args(arg_forms, env)),
                 "fn" => Some(eval_lambda_args(arg_forms)),
-                "quote" => Some(dont_eval_quote(arg_forms)),
+                "quote" => Some(dont_eval_quote_args(arg_forms)),
+                "cons" => Some(eval_cons_args(arg_forms, env)),
+                "car" => Some(eval_car_args(arg_forms, env)),
+                "cdr" => Some(eval_cdr_args(arg_forms, env)),
                 _ => None,
             }
         },
@@ -409,7 +456,58 @@ fn eval_built_in_form(exp: &LispExp, arg_forms: &[LispExp], env: &mut LispEnv) -
     }
 }
 
-fn dont_eval_quote(arg_forms: &[LispExp]) -> Result<LispExp, LispErr> {
+fn eval_cdr_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
+    if arg_forms.len() != 1 {
+        return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(1)));
+    }
+
+    let first_form = arg_forms.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(1)))?;
+    let exp = eval(first_form, env)?;
+
+    match &exp {
+        LispExp::Cons(_cell) => Ok(LispExp::Cdr(Rc::new(exp))),
+        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpExpected(LispExp::Cons(LispConsCell{ car: Rc::new(LispExp::Nil), cdr: Rc::new(LispExp::Nil) })))),
+    }
+}
+
+fn eval_car_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
+    if arg_forms.len() != 1 {
+        return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(1)));
+    }
+
+    let first_form = arg_forms.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(1)))?;
+    let exp = eval(first_form, env)?;
+
+    match &exp {
+        LispExp::Cons(_cell) => Ok(LispExp::Car(Rc::new(exp))),
+        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpExpected(LispExp::Cons(LispConsCell{ car: Rc::new(LispExp::Nil), cdr: Rc::new(LispExp::Nil) })))),
+    }
+}
+
+fn eval_cons_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
+    if arg_forms.len() != 2 {
+        return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)));
+    }
+    let car = arg_forms.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)))?;
+    let cdr = arg_forms.get(1).ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)))?;
+
+    Ok(LispExp::Cons(LispConsCell {
+        car: {
+            match eval(car, env) {
+                Ok(v) => Rc::new(v),
+                Err(_) => return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2))),
+            }
+        },
+        cdr: {
+            match eval(cdr, env) {
+                Ok(v) => Rc::new(v),
+                Err(_) => return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2))),
+            }
+        },
+    }))
+}
+
+fn dont_eval_quote_args(arg_forms: &[LispExp]) -> Result<LispExp, LispErr> {
     Ok(LispExp::Quote(arg_forms.to_vec()))
 }
 
@@ -771,6 +869,83 @@ mod tests {
         let mut output: Vec<u8> = vec![];
         let mut err_output: Vec<u8> = vec![];
         let result: Vec<u8> = format!("{}a b c (a,b)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn cons_test() {
+        let input: Vec<u8> = format!("(cons 1 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}(1,2)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn cons_2_test() {
+        let input: Vec<u8> = format!("(cons 1 nil){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}(1)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn cons_3_test() {
+        let input: Vec<u8> = format!("(cons 1 (cons 2 (cons 3 nil))){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}(1,2,3)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn failing_cons_test() {
+        let input: Vec<u8> = format!("(cons 1 (cons 2 (cons 3 nil))){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}(1)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_ne!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn car_test() {
+        let input: Vec<u8> = format!("(car (cons 2 (cons 3 nil))){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}(2)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn cdr_test() {
+        let input: Vec<u8> = format!("(cdr (cons 2 3)){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}(3)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn cdr_2_test() {
+        let input: Vec<u8> = format!("(cdr (cons 2 (cons 3 (cons 4 nil)))){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}(3,4)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
 
         run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
         assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
