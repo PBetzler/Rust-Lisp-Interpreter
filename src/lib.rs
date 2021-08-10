@@ -72,7 +72,8 @@ enum LispExp {
     List(Vec<LispExp>),
     Func(fn(&[LispExp]) -> Result<LispExp, LispErr>),
     Nil,
-    Lambda(LispLambda)
+    Lambda(LispLambda),
+    Quote(Vec<LispExp>),
 }
 
 #[derive(Clone)]
@@ -91,6 +92,7 @@ impl LispExp {
             LispExp::Func(_) => "function".to_string(),
             LispExp::Nil => "nil".to_string(),
             LispExp::Lambda(_) => "lambda".to_string(),
+            LispExp::Quote(_) => "quote".to_string(),
         }
     }
 }
@@ -108,6 +110,10 @@ impl Display for LispExp {
             LispExp::Func(_) => "Function {}".to_string(),
             LispExp::Nil => "nil".to_string(),
             LispExp::Lambda(_) => "Lambda {}".to_string(),
+            LispExp::Quote(list) => {
+                let xs: Vec<String> = list.iter().map(|x| x.to_string()).collect();
+                format!("{}", xs.join(" "))
+            },
         };
 
         write!(f, "{}", display_string)
@@ -188,10 +194,10 @@ fn parse(tokens: &[String]) -> Result<(LispExp, &[String]), LispErr> {
 
 fn read_seq(tokens: &[String]) -> Result<(LispExp, &[String]), LispErr> {
     let mut result: Vec<LispExp> = Vec::new();
-    let mut xs = tokens;
+    let mut rest_tokens = tokens;
 
     loop {
-        let (next_token, rest) = xs
+        let (next_token, rest) = rest_tokens
             .split_first()
             .ok_or(LispErr::UnbalancedParens)?;
 
@@ -199,9 +205,9 @@ fn read_seq(tokens: &[String]) -> Result<(LispExp, &[String]), LispErr> {
             return Ok((LispExp::List(result), rest));
         }
 
-        let (exp, new_xs) = parse(&xs)?;
+        let (exp, rest_tokens_minus_first) = parse(&rest_tokens)?;
         result.push(exp);
-        xs = new_xs;
+        rest_tokens = rest_tokens_minus_first;
     }
 }
 
@@ -221,7 +227,6 @@ fn parse_atom(token: &str) -> LispExp {
         }
     }
 }
-
 
 fn default_env<'a>() -> LispEnv<'a> {
     let mut data: HashMap<String, LispExp> = HashMap::new();
@@ -364,6 +369,7 @@ fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
         LispExp::Func(f) => Err(LispErr::SyntaxError(SyntaxErr::WrongExpDidNotExpect(LispExp::Func(*f)))),
         LispExp::Nil => Ok(LispExp::Nil),
         LispExp::Lambda(_) => Err(LispErr::SyntaxError(SyntaxErr::NoFormSyntaxExpected)),
+        LispExp::Quote(_) => Err(LispErr::SyntaxError(SyntaxErr::WrongExpDidNotExpect(LispExp::Quote(vec![])))),
     }
 }
 
@@ -379,13 +385,18 @@ fn eval_built_in_form(exp: &LispExp, arg_forms: &[LispExp], env: &mut LispEnv) -
         LispExp::Symbol(s) => {
             match s.as_ref() {
                 "if" => Some(eval_if_args(arg_forms, env)),
-                "def" => Some(eval_dev_args(arg_forms, env)),
+                "def" => Some(eval_def_args(arg_forms, env)),
                 "fn" => Some(eval_lambda_args(arg_forms)),
+                "quote" => Some(dont_eval_quote(arg_forms)),
                 _ => None,
             }
         },
         _ => None,
     }
+}
+
+fn dont_eval_quote(arg_forms: &[LispExp]) -> Result<LispExp, LispErr> {
+    Ok(LispExp::Quote(arg_forms.to_vec()))
 }
 
 fn eval_if_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
@@ -404,7 +415,7 @@ fn eval_if_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, Lis
     }
 }
 
-fn eval_dev_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
+fn eval_def_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
 
     if arg_forms.len() > 2 {
         return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)));
@@ -485,10 +496,15 @@ fn parse_list_of_symbol_strings(from: Rc<LispExp>) -> Result<Vec<String>, LispEr
 }
 
 fn parse_eval(exp: String, env: &mut LispEnv) -> Result<LispExp, LispErr> {
-    let (parsed_exp, _) = parse(&tokenize(exp))?;
-    let evaluated_exp = eval(&parsed_exp, env)?;
+    if parse(&tokenize(exp.clone()))?.1.is_empty() == false {
+        return Err(LispErr::UnbalancedParens);
+    } else {
+        let (parsed_exp, _) = parse(&tokenize(exp.clone()))?;
+        let evaluated_exp = eval(&parsed_exp, env)?;
 
-    Ok(evaluated_exp)
+        Ok(evaluated_exp)
+    }
+
 }
 
 fn slurp_exp() -> String {
