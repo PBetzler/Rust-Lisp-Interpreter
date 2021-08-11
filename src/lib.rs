@@ -80,10 +80,18 @@ pub fn run(src: InputSource, input: &mut (impl Read + BufRead), output: &mut imp
 
 fn lisp_exp_to_string(exp: &LispExp ) -> String {
     match exp {
-        LispExp::Cons(_) => format!("({})", exp),
-        LispExp::Car(_) => format!("({})", exp),
-        LispExp::Cdr(_) => format!("({})", exp),
+        LispExp::Cons(_) => add_parentheses_if_list(exp.to_string()),
+        LispExp::Car(_) => add_parentheses_if_list(exp.to_string()),
+        LispExp::Cdr(_) => add_parentheses_if_list(exp.to_string()),
         _ => exp.to_string(),
+    }
+}
+
+fn add_parentheses_if_list(input: String) -> String {
+    return if input.contains(",") {
+        format!("({})", input)
+    } else {
+        format!("{}", input)
     }
 }
 
@@ -206,7 +214,6 @@ impl Display for SyntaxErr {
 enum LispErr {
     SyntaxError(SyntaxErr),
     UnbalancedParens,
-    UnknownSymbol(String),
 }
 
 impl Display for LispErr {
@@ -214,7 +221,6 @@ impl Display for LispErr {
         let message: String = match self {
             LispErr::SyntaxError(err) => err.to_string(),
             LispErr::UnbalancedParens => "Unbalanced parens!".to_string(),
-            LispErr::UnknownSymbol(k) => format!("Unknown symbol {}!", k),
         };
 
         write!(f, "{}",message)
@@ -391,7 +397,12 @@ fn parse_list_of_floats(args: &[LispExp]) -> Result<Vec<f64>, LispErr> {
 fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
     match exp {
         LispExp::Bool(_b) => Ok(exp.clone()),
-        LispExp::Symbol(k) => env_get(k, env).ok_or(LispErr::UnknownSymbol(k.clone())).map(|x| x.clone()),
+        LispExp::Symbol(k) => {
+            match env_get(k, env) {
+                None => Ok(LispExp::Nil),
+                Some(x) => Ok(x.clone()),
+            }
+        },
         LispExp::Number(_a) => Ok(exp.clone()),
         LispExp::List(list) => {
             let first_form: Option<&LispExp> = list.first();
@@ -890,7 +901,7 @@ mod tests {
         let input: Vec<u8> = format!("(cons 1 nil){}", EXIT_PHRASE).as_bytes().to_vec();
         let mut output: Vec<u8> = vec![];
         let mut err_output: Vec<u8> = vec![];
-        let result: Vec<u8> = format!("{}(1)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+        let result: Vec<u8> = format!("{}1\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
 
         run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
         assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
@@ -923,7 +934,7 @@ mod tests {
         let input: Vec<u8> = format!("(car (cons 2 (cons 3 nil))){}", EXIT_PHRASE).as_bytes().to_vec();
         let mut output: Vec<u8> = vec![];
         let mut err_output: Vec<u8> = vec![];
-        let result: Vec<u8> = format!("{}(2)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+        let result: Vec<u8> = format!("{}2\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
 
         run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
         assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
@@ -934,7 +945,7 @@ mod tests {
         let input: Vec<u8> = format!("(cdr (cons 2 3)){}", EXIT_PHRASE).as_bytes().to_vec();
         let mut output: Vec<u8> = vec![];
         let mut err_output: Vec<u8> = vec![];
-        let result: Vec<u8> = format!("{}(3)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+        let result: Vec<u8> = format!("{}3\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
 
         run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
         assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
