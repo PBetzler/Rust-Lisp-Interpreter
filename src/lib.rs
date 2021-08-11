@@ -152,7 +152,12 @@ impl Display for LispExp {
             LispExp::Cdr(list) => {
                 match list.as_ref() {
                     LispExp::List(list) => {
-                        LispExp::List(list[1..].to_vec()).to_string()
+                        if list.len() > 1 {
+                            LispExp::List(list[1..].to_vec()).to_string()
+                        } else {
+                            LispExp::Nil.to_string()
+                        }
+
                     },
                     _ => panic!("Got an cdr expression that did not contain a list expression! Should never came so far!"),
                 }
@@ -198,7 +203,6 @@ impl Display for SyntaxErr {
 enum LispErr {
     SyntaxError(SyntaxErr),
     UnbalancedParens,
-    InternalError(String),
 }
 
 impl Display for LispErr {
@@ -206,7 +210,6 @@ impl Display for LispErr {
         let message: String = match self {
             LispErr::SyntaxError(err) => err.to_string(),
             LispErr::UnbalancedParens => "Unbalanced parens!".to_string(),
-            LispErr::InternalError(err) => format!("Internal Interpreter Error! Message was: {}", err),
         };
 
         write!(f, "{}",message)
@@ -567,23 +570,16 @@ fn eval_cons_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, L
         LispExp::List(mut list) => {
             let mut result = Vec::new();
             result.push(car);
-            let last = match list.last() {
-                None => Err(LispErr::InternalError("In eval_cons_args. Should always have at least a nil in the list!".to_string())),
-                Some(exp) => Ok(exp),
+
+            for elem in list.clone().iter().rev() {
+                match elem {
+                    LispExp::Nil => {
+                        list.pop();
+                    }
+                    _ => break,
+                };
             };
 
-            let last = match last {
-                Err(err) => return Err(err),
-                Ok(exp) => exp,
-            };
-
-            let list = match last {
-                LispExp::Nil => {
-                    list.pop();
-                    list
-                }
-                _ => list,
-            };
 
             result.extend(list);
             result
@@ -1055,6 +1051,17 @@ mod tests {
         let mut output: Vec<u8> = vec![];
         let mut err_output: Vec<u8> = vec![];
         let result: Vec<u8> = format!("{}(3,4)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn cdr_3_test() {
+        let input: Vec<u8> = format!("(cdr (cons nil nil)){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}nil\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
 
         run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
         assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
