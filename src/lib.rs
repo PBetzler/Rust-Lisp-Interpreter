@@ -5,7 +5,6 @@ use std::rc::Rc;
 use std::fs::File;
 use std::io::{BufReader, BufRead, Read, Write};
 use std::path::Path;
-use crate::SyntaxErr::SymbolOrListExpNeeded;
 
 pub enum InputSource {
     StdIn,
@@ -32,7 +31,7 @@ pub fn run(src: InputSource, input: &mut (impl Read + BufRead), output: &mut imp
                 }
 
                 match parse_eval(exp, env) {
-                    Ok(result) => match output.write_all(format!("{}\n", lisp_exp_to_string(&result)).as_bytes()) {
+                    Ok(result) => match output.write_all(format!("{}\n", result).as_bytes()) {
                         Ok(_) => {},
                         Err(_) => match err_out.write_all("Error, can not write to given output stream!".as_bytes()) {
                             Ok(_) => {}
@@ -79,23 +78,6 @@ pub fn run(src: InputSource, input: &mut (impl Read + BufRead), output: &mut imp
 
 }
 
-fn lisp_exp_to_string(exp: &LispExp ) -> String {
-    match exp {
-        LispExp::Cons(_) => add_parentheses_if_list(exp.to_string()),
-        LispExp::Car(_) => add_parentheses_if_list(exp.to_string()),
-        LispExp::Cdr(_) => add_parentheses_if_list(exp.to_string()),
-        _ => exp.to_string(),
-    }
-}
-
-fn add_parentheses_if_list(input: String) -> String {
-    return if input.contains(",") {
-        format!("({})", input)
-    } else {
-        format!("{}", input)
-    }
-}
-
 #[derive(Clone)]
 enum LispExp {
     Bool(bool),
@@ -106,15 +88,8 @@ enum LispExp {
     Nil,
     Lambda(LispLambda),
     Quote(Vec<LispExp>),
-    Cons(LispConsCell),
     Car(Rc<LispExp>),
     Cdr(Rc<LispExp>),
-}
-
-#[derive(Clone)]
-struct LispConsCell {
-    car: Rc<LispExp>,
-    cdr: Rc<LispExp>,
 }
 
 #[derive(Clone)]
@@ -134,7 +109,6 @@ impl LispExp {
             LispExp::Nil => "nil".to_string(),
             LispExp::Lambda(_) => "lambda".to_string(),
             LispExp::Quote(_) => "quote".to_string(),
-            LispExp::Cons(_) => "cons".to_string(),
             LispExp::Car(_) => "car".to_string(),
             LispExp::Cdr(_) => "cdr".to_string(),
         }
@@ -149,7 +123,15 @@ impl Display for LispExp {
             LispExp::Number(n) => n.to_string(),
             LispExp::List(list) => {
                 let xs: Vec<String> = list.iter().map(|x| x.to_string()).collect();
-                format!("({})", xs.join(","))
+                if xs.len() == 1 {
+                    match xs.first() {
+                        None => panic!("Couldn't read to string transformed expression!"),
+                        Some(xs) => format!("{}", xs),
+                    }
+                } else {
+                    format!("({})", xs.join(","))
+                }
+
             },
             LispExp::Func(_) => "Function {}".to_string(),
             LispExp::Nil => "nil".to_string(),
@@ -158,22 +140,21 @@ impl Display for LispExp {
                 let xs: Vec<String> = list.iter().map(|x| x.to_string()).collect();
                 format!("{}", xs.join(" "))
             },
-            LispExp::Cons(cell) => {
-                match cell.cdr.as_ref() {
-                    LispExp::Nil => cell.car.to_string(),
-                    _ => format!("{},{}", cell.car.to_string(), cell.cdr.to_string()),
-                }
-            }
-            LispExp::Car(cons) => {
-                match cons.as_ref() {
-                    LispExp::Cons(cell) => cell.car.to_string(),
-                    _ => panic!("Got an car expression that did not contain a cons expression! Should never came so far!"),
+            LispExp::Car(list) => {
+                match list.as_ref() {
+                    LispExp::List(list) => match list.first() {
+                        None => panic!("Got an car expression that did not contain a list expression! Should never came so far!"),
+                        Some(msg) => msg.to_string(),
+                    },
+                    _ => panic!("Got an car expression that did not contain a list expression! Should never came so far!"),
                 }
             },
-            LispExp::Cdr(cons) => {
-                match cons.as_ref() {
-                    LispExp::Cons(cell) => cell.cdr.to_string(),
-                    _ => panic!("Got an cdr expression that did not contain a cons expression! Should never came so far!"),
+            LispExp::Cdr(list) => {
+                match list.as_ref() {
+                    LispExp::List(list) => {
+                        LispExp::List(list[1..].to_vec()).to_string()
+                    },
+                    _ => panic!("Got an cdr expression that did not contain a list expression! Should never came so far!"),
                 }
             },
         };
@@ -217,6 +198,7 @@ impl Display for SyntaxErr {
 enum LispErr {
     SyntaxError(SyntaxErr),
     UnbalancedParens,
+    InternalError(String),
 }
 
 impl Display for LispErr {
@@ -224,6 +206,7 @@ impl Display for LispErr {
         let message: String = match self {
             LispErr::SyntaxError(err) => err.to_string(),
             LispErr::UnbalancedParens => "Unbalanced parens!".to_string(),
+            LispErr::InternalError(err) => format!("Internal Interpreter Error! Message was: {}", err),
         };
 
         write!(f, "{}",message)
@@ -344,7 +327,7 @@ fn default_env<'a>() -> LispEnv<'a> {
     );
 
     data.insert(
-        "mod".to_string(),
+        "%".to_string(),
         LispExp::Func(
             |args: &[LispExp]| -> Result<LispExp, LispErr> {
                 let floats = parse_list_of_floats(args)?;
@@ -355,6 +338,22 @@ fn default_env<'a>() -> LispEnv<'a> {
                 let second = floats[1];
 
                 Ok(LispExp::Number(first % second))
+            }
+        )
+    );
+
+    data.insert(
+        "pow".to_string(),
+        LispExp::Func(
+            |args: &[LispExp]| -> Result<LispExp, LispErr> {
+                let floats = parse_list_of_floats(args)?;
+                if floats.len() != 2 {
+                    return Err(LispErr::SyntaxError(SyntaxErr::WrongExpNumber));
+                }
+                let first = *floats.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongExpNumber))?;
+                let second = floats[1];
+
+                Ok(LispExp::Number(first.powf(second)))
             }
         )
     );
@@ -439,9 +438,8 @@ fn eval (exp: &LispExp, env: &mut LispEnv) -> Result<LispExp, LispErr> {
         LispExp::Nil => Ok(LispExp::Nil),
         LispExp::Lambda(_) => Err(LispErr::SyntaxError(SyntaxErr::NoFormSyntaxExpected)),
         LispExp::Quote(_) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Quote(vec![])))),
-        LispExp::Cons(cell) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Cons(cell.clone())))),
-        LispExp::Car(cell) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Car(cell.clone())))),
-        LispExp::Cdr(cell) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Cdr(cell.clone())))),
+        LispExp::Car(_) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Car(Rc::new(LispExp::List(vec![])))))),
+        LispExp::Cdr(_) => Err(LispErr::SyntaxError(SyntaxErr::SimpleExpNeeded(LispExp::Cdr(Rc::new(LispExp::List(vec![])))))),
     }
 }
 
@@ -487,7 +485,7 @@ fn eval_let_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, Li
                 match x {
                     LispExp::Symbol(s) => eval_def_args(vec![LispExp::Symbol(s.clone())].as_slice(), env),
                     LispExp::List(list) => eval_def_args(list.as_slice(), env),
-                    _ => Err(LispErr::SyntaxError(SymbolOrListExpNeeded())),
+                    _ => Err(LispErr::SyntaxError(SyntaxErr::SymbolOrListExpNeeded())),
                 }
             }).collect();
 
@@ -496,7 +494,7 @@ fn eval_let_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, Li
                 Err(err) => Err(err),
             }
         }
-        _ => Err(LispErr::SyntaxError(SymbolOrListExpNeeded())),
+        _ => Err(LispErr::SyntaxError(SyntaxErr::SymbolOrListExpNeeded())),
     };
 
     match first_form {
@@ -528,8 +526,8 @@ fn eval_cdr_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, Li
     let exp = eval(first_form, env)?;
 
     match &exp {
-        LispExp::Cons(_cell) => Ok(LispExp::Cdr(Rc::new(exp))),
-        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpExpected(LispExp::Cons(LispConsCell{ car: Rc::new(LispExp::Nil), cdr: Rc::new(LispExp::Nil) })))),
+        LispExp::List(_) => Ok(LispExp::Cdr(Rc::new(exp))),
+        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpExpected(LispExp::List(vec![])))),
     }
 }
 
@@ -542,8 +540,8 @@ fn eval_car_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, Li
     let exp = eval(first_form, env)?;
 
     match &exp {
-        LispExp::Cons(_cell) => Ok(LispExp::Car(Rc::new(exp))),
-        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpExpected(LispExp::Cons(LispConsCell{ car: Rc::new(LispExp::Nil), cdr: Rc::new(LispExp::Nil) })))),
+        LispExp::List(_) => Ok(LispExp::Car(Rc::new(exp))),
+        _ => Err(LispErr::SyntaxError(SyntaxErr::WrongExpExpected(LispExp::List(vec![])))),
     }
 }
 
@@ -554,20 +552,54 @@ fn eval_cons_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, L
     let car = arg_forms.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)))?;
     let cdr = arg_forms.get(1).ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)))?;
 
-    Ok(LispExp::Cons(LispConsCell {
-        car: {
-            match eval(car, env) {
-                Ok(v) => Rc::new(v),
-                Err(_) => return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2))),
+
+    let car = match eval(car, env) {
+        Ok(v) => v,
+        Err(_) => return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2))),
+    };
+
+    let cdr = match eval(cdr, env) {
+        Ok(v) => v,
+        Err(_) => return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2))),
+    };
+
+    let list = match cdr {
+        LispExp::List(mut list) => {
+            let mut result = Vec::new();
+            result.push(car);
+            let last = match list.last() {
+                None => Err(LispErr::InternalError("In eval_cons_args. Should always have at least a nil in the list!".to_string())),
+                Some(exp) => Ok(exp),
+            };
+
+            let last = match last {
+                Err(err) => return Err(err),
+                Ok(exp) => exp,
+            };
+
+            let list = match last {
+                LispExp::Nil => {
+                    list.pop();
+                    list
+                }
+                _ => list,
+            };
+
+            result.extend(list);
+            result
+        }
+        _ => {
+            let mut result = Vec::new();
+            result.push(car);
+            match cdr {
+                LispExp::Nil => {}
+                _ => result.push(cdr)
             }
-        },
-        cdr: {
-            match eval(cdr, env) {
-                Ok(v) => Rc::new(v),
-                Err(_) => return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2))),
-            }
-        },
-    }))
+            result
+        }
+    };
+
+    Ok(LispExp::List(list))
 }
 
 fn dont_eval_quote_args(arg_forms: &[LispExp]) -> Result<LispExp, LispErr> {
@@ -810,7 +842,7 @@ mod tests {
 
     #[test]
     fn mod_test() {
-        let input: Vec<u8> = format!("(mod 3 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let input: Vec<u8> = format!("(% 3 2){}", EXIT_PHRASE).as_bytes().to_vec();
         let mut output: Vec<u8> = vec![];
         let mut err_output: Vec<u8> = vec![];
         let result: Vec<u8> = format!("{}1\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
@@ -821,13 +853,24 @@ mod tests {
 
     #[test]
     fn failing_mod_test() {
-        let input: Vec<u8> = format!("(mod 3 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let input: Vec<u8> = format!("(% 3 2){}", EXIT_PHRASE).as_bytes().to_vec();
         let mut output: Vec<u8> = vec![];
         let mut err_output: Vec<u8> = vec![];
         let result: Vec<u8> = format!("{}3\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
 
         run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
         assert_ne!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn pow_test() {
+        let input: Vec<u8> = format!("(pow 2 2){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}4\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
     }
 
     #[test]

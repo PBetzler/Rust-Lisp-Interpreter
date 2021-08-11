@@ -30,8 +30,9 @@ By now, the interpreter supports:
 - <
 - <=
 - =
+- pow
 
-Rust takes care of the memory management and thus a garbage collector is not needed.
+Rust takes care of the memory management and therefore a garbage collector is not needed.
 
 To read from stdin skip the args or add '-s',
 to read and interpret a file add '-f' and 'filepath'.
