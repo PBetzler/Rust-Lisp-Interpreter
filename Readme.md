@@ -10,7 +10,7 @@ By now, the interpreter supports:
 - Booleans
 - Symbols
 - Numbers
-- Lists
+- Lists (including list key word)
 - Functions
 - Lambdas
 - Nil
@@ -18,6 +18,7 @@ By now, the interpreter supports:
 - Cons
 - Car
 - Cdr
+- Let
  
 - \+
 - \-

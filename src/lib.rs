@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::fs::File;
 use std::io::{BufReader, BufRead, Read, Write};
 use std::path::Path;
+use crate::SyntaxErr::SymbolOrListExpNeeded;
 
 pub enum InputSource {
     StdIn,
@@ -190,6 +191,7 @@ enum SyntaxErr {
     WrongFormExp(usize, LispExp),
     NoFormSyntaxExpected,
     SimpleExpNeeded(LispExp),
+    SymbolOrListExpNeeded(),
 
 }
 
@@ -205,6 +207,7 @@ impl Display for SyntaxErr {
             SyntaxErr::WrongFormExp(n, exp) => format!("Expected form number: {} to be a {}", n, exp.exp_to_string()),
             SyntaxErr::NoFormSyntaxExpected => format!("Did not expect form syntax here!"),
             SyntaxErr::SimpleExpNeeded(exp) => format!("Needed a bool, symbol, number, list or nil expression, but got a {}!", exp.exp_to_string()),
+            SyntaxErr::SymbolOrListExpNeeded() => format!("Needed a symbol or a list expression, but got a something else!"),
         };
 
         write!(f, "{} {}", preamble, message)
@@ -460,10 +463,59 @@ fn eval_built_in_form(exp: &LispExp, arg_forms: &[LispExp], env: &mut LispEnv) -
                 "cons" => Some(eval_cons_args(arg_forms, env)),
                 "car" => Some(eval_car_args(arg_forms, env)),
                 "cdr" => Some(eval_cdr_args(arg_forms, env)),
+                "list" => Some(eval_list_args(arg_forms, env)),
+                "let" => Some(eval_let_args(arg_forms, env)),
                 _ => None,
             }
         },
         _ => None,
+    }
+}
+
+fn eval_let_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
+    if arg_forms.len() != 2 {
+        return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)));
+    }
+
+    let first_form = arg_forms.first().ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)))?;
+    let second_form = arg_forms.get(1).ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)))?;
+
+    let first_form = match first_form {
+        LispExp::Symbol(_) => eval_def_args(vec![first_form.clone()].as_slice(), env),
+        LispExp::List(list) => {
+            let res = list.iter().map(|x| {
+                match x {
+                    LispExp::Symbol(s) => eval_def_args(vec![LispExp::Symbol(s.clone())].as_slice(), env),
+                    LispExp::List(list) => eval_def_args(list.as_slice(), env),
+                    _ => Err(LispErr::SyntaxError(SymbolOrListExpNeeded())),
+                }
+            }).collect();
+
+            match res {
+                Ok(vec) => Ok(LispExp::List(vec)),
+                Err(err) => Err(err),
+            }
+        }
+        _ => Err(LispErr::SyntaxError(SymbolOrListExpNeeded())),
+    };
+
+    match first_form {
+        Ok(_) => eval(second_form, env),
+        Err(err) => Err(err),
+    }
+}
+
+fn eval_list_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, LispErr> {
+    if arg_forms.len() < 2 {
+        return Err(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)));
+    }
+
+    match arg_forms
+        .iter()
+        .map(|x| {eval(x, env)})
+        .collect() {
+        Ok(vec) => Ok(LispExp::List(vec)),
+        Err(err) => Err(err),
     }
 }
 
@@ -550,9 +602,12 @@ fn eval_def_args(arg_forms: &[LispExp], env: &mut LispEnv) -> Result<LispExp, Li
         _ => Err(LispErr::SyntaxError(SyntaxErr::WrongFormExp(0, LispExp::Symbol("a".to_string()))))
     }?;
 
-    let second_form = arg_forms.get(1).ok_or(LispErr::SyntaxError(SyntaxErr::WrongFormNum(2)))?;
+    let second_form = match arg_forms.get(1) {
+        None => &LispExp::Nil,
+        Some(exp) => exp
+    };
 
-    let second_eval = eval(second_form, env)?;
+    let second_eval = eval(&second_form, env)?;
     env.data.insert(first_str, second_eval);
 
     Ok(first_form.clone())
@@ -957,6 +1012,39 @@ mod tests {
         let mut output: Vec<u8> = vec![];
         let mut err_output: Vec<u8> = vec![];
         let result: Vec<u8> = format!("{}(3,4)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn list_symbols_test() {
+        let input: Vec<u8> = format!("(list 1 2 3){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}(1,2,3)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn empty_let_test() {
+        let input: Vec<u8> = format!("(let (a b) (list a b)){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}(nil,nil)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
+
+        run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
+        assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
+    }
+
+    #[test]
+    fn let_test() {
+        let input: Vec<u8> = format!("(let ((a 1) (b 2)) (list a b)){}", EXIT_PHRASE).as_bytes().to_vec();
+        let mut output: Vec<u8> = vec![];
+        let mut err_output: Vec<u8> = vec![];
+        let result: Vec<u8> = format!("{}(1,2)\n{}", RESULT_PART, RESULT_PART).as_bytes().to_vec();
 
         run(InputSource::StdIn, &mut BufReader::new(input.as_slice()), &mut output, &mut err_output);
         assert_eq!(std::str::from_utf8(&output), std::str::from_utf8(&result));
